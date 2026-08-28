@@ -103,19 +103,30 @@ export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const watchId = useRef<number | null>(null);
   const smoothHeading = useRef(0);
+  const originRef = useRef<Point | null>(null);
+  const sensorsEnabled = useRef(false);
+  const mapGesture = useRef({ active: false, moved: false, pointers: new Map<number, { x: number; y: number }>(), startDistance: 0, startZoom: 1, startPan: { x: 0, y: 0 }, startPoint: { x: 0, y: 0 } });
+  const [mapZoom, setMapZoom] = useState(1);
+  const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
 
   const setStatus = useCallback((message: string) => { setToastMessage(message); }, []);
 
   useEffect(() => {
     if (!navigator.geolocation) { setGpsState("error"); setStatus("GPS indisponível neste navegador"); return; }
-    const onPosition = (position: GeolocationPosition) => { setOrigin({ lat: position.coords.latitude, lng: position.coords.longitude }); setGpsState(navigator.onLine ? "ready" : "offline"); };
-    const onError = () => { setGpsState("error"); setStatus("GPS não respondeu — toque no mapa para definir a origem"); };
+    const onPosition = (position: GeolocationPosition) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; originRef.current = next; setOrigin(next); setGpsState(navigator.onLine ? "ready" : "offline"); };
+    const onError = (error: GeolocationPositionError) => { if (error.code !== error.PERMISSION_DENIED) setGpsState("error"); setStatus(error.code === error.PERMISSION_DENIED ? "Permissão de localização recusada" : "GPS não respondeu — toque no mapa para definir a origem"); };
     navigator.geolocation.getCurrentPosition(onPosition, onError, { enableHighAccuracy: true, timeout: 12000, maximumAge: 10000 });
-    watchId.current = navigator.geolocation.watchPosition(onPosition, onError, { enableHighAccuracy: true, timeout: 20000, maximumAge: 3000 });
-    const offline = () => setGpsState("offline"); const online = () => setGpsState(origin ? "ready" : "waiting");
+    const offline = () => setGpsState("offline"); const online = () => setGpsState(originRef.current ? "ready" : "waiting");
     window.addEventListener("offline", offline); window.addEventListener("online", online);
-    return () => { if (watchId.current !== null) navigator.geolocation.clearWatch(watchId.current); window.removeEventListener("offline", offline); window.removeEventListener("online", online); };
-  }, [origin, setStatus]);
+    return () => { window.removeEventListener("offline", offline); window.removeEventListener("online", online); };
+  }, [setStatus]);
+  useEffect(() => {
+    if (!isNavigating || !navigator.geolocation) return;
+    const onPosition = (position: GeolocationPosition) => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; originRef.current = next; setOrigin(next); setGpsState(navigator.onLine ? "ready" : "offline"); };
+    const onError = () => setStatus("Sinal GPS fraco — mantendo a última posição válida");
+    watchId.current = navigator.geolocation.watchPosition(onPosition, onError, { enableHighAccuracy: true, timeout: 20000, maximumAge: 3000 });
+    return () => { if (watchId.current !== null) { navigator.geolocation.clearWatch(watchId.current); watchId.current = null; } };
+  }, [isNavigating, setStatus]);
 
   const handleOrientation = useCallback((event: DeviceOrientationEvent) => {
     const raw = typeof (event as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading === "number" ? (event as DeviceOrientationEvent & { webkitCompassHeading: number }).webkitCompassHeading : event.alpha == null ? null : normalizeHeading(360 - event.alpha);
@@ -139,25 +150,33 @@ export default function Home() {
     try {
       const orientation = DeviceOrientationEvent as typeof DeviceOrientationEvent & { requestPermission?: () => Promise<string> };
       if (orientation.requestPermission) { const permission = await orientation.requestPermission(); if (permission !== "granted") throw new Error("Orientação recusada"); }
-      window.addEventListener("deviceorientationabsolute", handleOrientation, true); window.addEventListener("deviceorientation", handleOrientation, true); setHeadingQuality("waiting");
+      if (!sensorsEnabled.current) { window.addEventListener("deviceorientationabsolute", handleOrientation, true); window.addEventListener("deviceorientation", handleOrientation, true); sensorsEnabled.current = true; } setHeadingQuality("waiting");
       return true;
     } catch { setHeadingQuality("unsupported"); setStatus("Bússola bloqueada — use o botão de calibração do navegador"); return false; }
   }, [handleOrientation, setStatus]);
+  const disableSensors = () => { if (sensorsEnabled.current) { window.removeEventListener("deviceorientationabsolute", handleOrientation, true); window.removeEventListener("deviceorientation", handleOrientation, true); sensorsEnabled.current = false; } };
+  const requestLocation = () => { if (!navigator.geolocation) { setGpsState("error"); setStatus("GPS indisponível neste navegador"); return; } setGpsState("waiting"); setStatus("Solicitando posição atual…"); navigator.geolocation.getCurrentPosition(position => { const next = { lat: position.coords.latitude, lng: position.coords.longitude }; originRef.current = next; setOrigin(next); setMapPan({ x: 0, y: 0 }); setMapZoom(1); setGpsState(navigator.onLine ? "ready" : "offline"); setStatus("Posição atualizada e mapa recentralizado"); }, error => { setGpsState(error.code === error.PERMISSION_DENIED ? "error" : "offline"); setStatus(error.code === error.PERMISSION_DENIED ? "Permita a localização nas configurações do navegador" : "Não foi possível obter o GPS agora"); }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }); };
 
   const startCamera = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) { setCameraState("blocked"); setStatus("Câmera indisponível neste contexto"); return false; }
-    try { const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }); if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => undefined); } setCameraState("ready"); return true; } catch { setCameraState("blocked"); setStatus("Permita a câmera para entrar no modo AR"); return false; }
+    try { const oldStream = videoRef.current?.srcObject as MediaStream | null; oldStream?.getTracks().forEach(track => track.stop()); const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }); if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play().catch(() => undefined); } setCameraState("ready"); return true; } catch { setCameraState("blocked"); setStatus("Permita a câmera para entrar no modo AR"); return false; }
   }, [setStatus]);
 
   const enterAR = async (simulated = false) => { if (!route) { setStatus("Calcule uma rota antes de iniciar o AR"); return; } setSimulation(simulated); setSimulationPaused(false); const sensorOk = simulated ? true : await enableSensors(); const cameraOk = simulated ? true : await startCamera(); if (!cameraOk) return; if (!sensorOk) toast("AR ativo com heading estimado — calibre para maior precisão"); setMode("ar"); setIsNavigating(true); setActiveStep(0); };
   const calibrateHeading = () => { setCalibration("calibrating"); setStatus("Gire o aparelho lentamente para calibrar"); window.setTimeout(() => { const offset = normalizeHeading(-smoothHeading.current); setHeadingOffset(offset); localStorage.setItem("gps-ar-heading-offset", String(offset)); localStorage.setItem("gps-ar-calibration", "ready"); setCalibration("ready"); setStatus("Bússola calibrada e offset salvo"); }, 2200); };
-  const exitAR = () => { setMode("map"); setIsNavigating(false); setSimulation(false); setSimulationPaused(false); const stream = videoRef.current?.srcObject as MediaStream | null; stream?.getTracks().forEach(track => track.stop()); if (videoRef.current) videoRef.current.srcObject = null; };
+  const exitAR = () => { setMode("map"); setIsNavigating(false); setSimulation(false); setSimulationPaused(false); disableSensors(); const stream = videoRef.current?.srcObject as MediaStream | null; stream?.getTracks().forEach(track => track.stop()); if (videoRef.current) videoRef.current.srcObject = null; setCameraState("off"); };
 
   const handleMapTap = (event: React.MouseEvent<HTMLDivElement>) => {
+    if (mapGesture.current.moved) { mapGesture.current.moved = false; return; }
     const rect = event.currentTarget.getBoundingClientRect(); const x = (event.clientX - rect.left) / rect.width; const y = (event.clientY - rect.top) / rect.height;
-    const base = origin || FALLBACK_ORIGIN; const destinationPoint = { lat: base.lat + (0.018 - y * 0.036), lng: base.lng + (x - 0.5) * 0.05 };
+    const base = origin || FALLBACK_ORIGIN; const destinationPoint = { lat: base.lat + (0.018 - y * 0.036) / mapZoom, lng: base.lng + ((x - 0.5) * 0.05) / mapZoom };
     setDestination(destinationPoint); setDestinationText("Ponto marcado no mapa"); setRoute(null); setStatus("Destino fixado — pronto para calcular");
   };
+  const handleMapPointerDown = (event: React.PointerEvent<HTMLDivElement>) => { event.currentTarget.setPointerCapture(event.pointerId); const gesture = mapGesture.current; gesture.active = true; gesture.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); gesture.startPan = mapPan; gesture.startZoom = mapZoom; gesture.startPoint = { x: event.clientX, y: event.clientY }; if (gesture.pointers.size === 2) { const points = Array.from(gesture.pointers.values()); gesture.startDistance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y); gesture.startZoom = mapZoom; } };
+  const handleMapPointerMove = (event: React.PointerEvent<HTMLDivElement>) => { const gesture = mapGesture.current; if (!gesture.active || !gesture.pointers.has(event.pointerId)) return; gesture.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (gesture.pointers.size === 1) { const dx = event.clientX - gesture.startPoint.x; const dy = event.clientY - gesture.startPoint.y; if (Math.hypot(dx, dy) > 6) gesture.moved = true; setMapPan({ x: gesture.startPan.x + dx, y: gesture.startPan.y + dy }); } else if (gesture.pointers.size >= 2) { gesture.moved = true; const points = Array.from(gesture.pointers.values()); const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y); if (gesture.startDistance > 0) setMapZoom(clamp(gesture.startZoom * (distance / gesture.startDistance), 0.75, 2.8)); } };
+  const handleMapPointerUp = (event: React.PointerEvent<HTMLDivElement>) => { const gesture = mapGesture.current; gesture.pointers.delete(event.pointerId); if (gesture.pointers.size === 0) gesture.active = false; };
+  const handleMapWheel = (event: React.WheelEvent<HTMLDivElement>) => { event.preventDefault(); setMapZoom(value => clamp(value - event.deltaY * 0.001, 0.75, 2.8)); };
+
 
   const searchDestination = async () => {
     if (!destinationText.trim()) return; setSearching(true);
@@ -179,11 +198,11 @@ export default function Home() {
 
   return <main className={`app-shell ${mapNight ? "night" : "day"}`}>
     <video ref={videoRef} className="ar-video" playsInline muted aria-hidden="true" />
-    <section className={`map-stage ${mode === "ar" ? "is-hidden" : ""}`} onClick={handleMapTap} aria-label="Mapa interativo, toque para fixar um destino">
-      <div className="map-texture" /><div className="map-grid" /><div className="road road-a" /><div className="road road-b" /><div className="road road-c" />
+    <section className={`map-stage ${mode === "ar" ? "is-hidden" : ""}`} onClick={handleMapTap} onPointerDown={handleMapPointerDown} onPointerMove={handleMapPointerMove} onPointerUp={handleMapPointerUp} onPointerCancel={handleMapPointerUp} onWheel={handleMapWheel} aria-label="Mapa interativo, arraste, use pinça para zoom ou toque para fixar um destino">
+      <div className="map-world" style={{ transform: `translate(${mapPan.x}px, ${mapPan.y}px) scale(${mapZoom})` }}><div className="map-texture" /><div className="map-grid" /><div className="road road-a" /><div className="road road-b" /><div className="road road-c" />
       {route && <svg className="route-line" viewBox="0 0 100 100" preserveAspectRatio="none"><polyline points={route.points.map((point, i) => `${i === 0 ? 50 : clamp(50 + (point.lng - (origin || FALLBACK_ORIGIN).lng) * 8000, 10, 90)},${i === 0 ? 54 : clamp(50 - (point.lat - (origin || FALLBACK_ORIGIN).lat) * 8000, 12, 88)}`).join(" ")} fill="none" stroke={routeColor} strokeWidth={routeWidth / 2} strokeLinecap="round" strokeLinejoin="round" /></svg>}
       <div className="map-label label-one">AV. PAULISTA</div><div className="map-label label-two">R. AUGUSTA</div><div className="map-label label-three">CENTRO · SP</div>
-      <div className="user-marker"><span /><i>▴</i><b>VOCÊ</b></div>{destination && <div className="destination-marker" style={markerStyle}><MapPin size={18} /><span>DESTINO</span></div>}
+      <div className="user-marker"><span /><i>▴</i><b>VOCÊ</b></div>{destination && <div className="destination-marker" style={markerStyle}><MapPin size={18} /><span>DESTINO</span></div>}</div>
     </section>
 
     {mode === "ar" && <section className="ar-stage" aria-label="Modo de navegação em realidade aumentada"><div className="ar-vignette" /><div className="ar-horizon" /><div className="ar-crosshair"><Crosshair size={22} /><span>ALINHE O HORIZONTE</span></div><div className="ar-guide" style={{ transform: `translateX(-50%) rotate(${relativeBearing * 0.55}deg)` }}><div className="guide-ring" /><Navigation size={82} fill={routeColor} color={routeColor} strokeWidth={1.4} /></div><div className="ar-road-glow" style={{ background: `linear-gradient(90deg, transparent, ${routeColor}55, transparent)` }} /><div className="ar-caption">{cameraState === "ready" ? "CÂMERA ATIVA · ROTA EM FOCO" : "CÂMERA INDISPONÍVEL"}</div></section>}
@@ -193,7 +212,7 @@ export default function Home() {
     <div className="left-rail"><div className="rail-tag">{mode === "ar" ? "AR / LIVE" : "MAP / LOCAL"}</div><div className="rail-line" /><div className="rail-coordinate mono">{(origin || FALLBACK_ORIGIN).lat.toFixed(4)}<br />{(origin || FALLBACK_ORIGIN).lng.toFixed(4)}</div></div>
 
     {mode === "ar" && <button className="exit-ar icon-button" onClick={exitAR} aria-label="Sair do modo AR"><X size={20} /></button>}
-    {mode === "map" && <button className="recenter icon-button" onClick={() => { if (!origin) { setOrigin(FALLBACK_ORIGIN); setStatus("Posição de demonstração ativada"); } else setStatus("Mapa centralizado na sua posição"); }} aria-label="Recentralizar mapa"><LocateFixed size={19} /></button>}
+    {mode === "map" && <button className="recenter icon-button" onClick={requestLocation} aria-label="Recentralizar mapa"><LocateFixed size={19} /></button>}
 
     <section className={`command-deck ${mode === "ar" ? "ar-deck" : ""}`}>
       <div className="deck-topline"><span className="mono">{mode === "ar" ? "NAVEGAÇÃO ATIVA" : "PLANEJAR TRAJETO"}</span><span className="deck-separator" /><span className="mono">{navigator.onLine ? "LINK ONLINE" : "CACHE LOCAL"}</span><span className="deck-separator" /><span className="mono">{route ? "ROTA CONFIRMADA" : "AGUARDANDO DESTINO"}</span></div>

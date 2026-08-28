@@ -1,7 +1,10 @@
-# Backlog — correção do deploy Netlify
+# Backlog — recuperação funcional do GPS AR
 
-- [x] Auditar package.json, vite.config, estrutura do repositório e diretório de saída.
-- [x] Confirmar se o Netlify está apontando para a raiz correta ou para uma subpasta.
-- [x] Adicionar configuração declarativa do Netlify para build, publish e SPA fallback.
-- [x] Validar o build local e confirmar a existência de `dist/public/index.html`.
-- [x] Entregar instruções exatas para atualizar as configurações no Netlify e refazer o deploy.
+- [x] Auditar a implementação atual de mapa, geolocalização, sensores e renderização.
+- [x] Remover loops de `watchPosition` e listeners duplicados de orientação.
+- [x] Implementar mapa pan/zoom com ponteiros e gesto de pinça no celular.
+- [x] Fazer o botão de localização solicitar uma leitura única e recentralizar com feedback claro.
+- [x] Stabilizar permissões e ciclo de câmera sem manter streams ou watchers órfãos.
+- [x] Restaurar fluxo de destino, rota e navegação com fallback seguro.
+- [x] Validar no desktop e mobile, incluindo interação por toque.
+- [x] Salvar checkpoint da correção e entregar instruções de teste.
